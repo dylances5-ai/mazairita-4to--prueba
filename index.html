@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="es-AR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Mazairita · Realidad Aumentada</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#0d1117;color:#fff;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;touch-action:none;-webkit-user-select:none;user-select:none}
+  #cam{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;z-index:0;display:none}
+  canvas{position:fixed;inset:0;width:100%;height:100%;z-index:1;display:block}
+  #ui{position:fixed;inset:0;z-index:2;pointer-events:none;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);box-sizing:border-box}
+  #ui>*{pointer-events:auto}
+  .panel{position:absolute;left:16px;right:16px;text-align:center}
+  #inicio{inset:0;left:0;right:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;background:#0d1117;padding:24px}
+  #inicio h1{margin:0;font-size:2rem}
+  #barra{width:80%;max-width:320px;height:10px;background:#333;border-radius:6px;overflow:hidden}
+  #barra i{display:block;height:100%;width:0;background:#ffd23f;transition:width .2s}
+  #aviso{font-size:.95rem;max-width:320px;color:#ffd23f;min-height:1.2em}
+  button{font:inherit;font-weight:700;min-height:56px;min-width:56px;padding:0 28px;border:3px solid #fff;border-radius:16px;background:#ffd23f;color:#111;font-size:1.25rem}
+  button:disabled{opacity:.4}
+  button.sec{background:#111;color:#fff}
+  #indicacion{top:16px;background:rgba(0,0,0,.75);padding:12px;border-radius:12px;font-size:1.05rem}
+  #subs{bottom:110px;background:rgba(0,0,0,.8);padding:10px;border-radius:10px;font-size:1.1rem;display:none}
+  #pregunta,#fin{bottom:24px;display:none;background:rgba(0,0,0,.8);padding:16px;border-radius:16px}
+  #pregunta p{margin:0 0 12px;font-size:1.2rem}
+  #pregunta .fila,#fin .fila{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+  #chau{top:30%;display:none;font-size:3rem;font-weight:800;background:#ffd23f;color:#111;border:4px solid #fff;border-radius:20px;padding:20px}
+  #reubicar{position:absolute;top:calc(env(safe-area-inset-top) + 12px);right:12px;min-height:48px;padding:0 16px;font-size:1rem;display:none}
+</style>
+<!-- es-module-shims: hace funcionar el importmap en Safari viejos -->
+<script async src="https://cdn.jsdelivr.net/npm/es-module-shims@1.8.3/dist/es-module-shims.js"></script>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<video id="cam" playsinline muted autoplay></video>
+
+<div id="ui">
+  <div id="inicio">
+    <h1>Mazairita</h1>
+    <div>Una experiencia de Realidad Aumentada</div>
+    <div id="barra"><i></i></div>
+    <div id="aviso">Cargando…</div>
+    <button id="btnComenzar" disabled>Comenzar</button>
+  </div>
+  <button id="reubicar" class="sec">Reubicar</button>
+  <div id="indicacion" class="panel" style="display:none"></div>
+  <div id="chau" class="panel"></div>
+  <div id="subs" class="panel"></div>
+  <div id="pregunta" class="panel"><p id="textoPregunta"></p>
+    <div class="fila"><button id="btnSi">SÍ</button><button id="btnNo" class="sec">NO</button></div></div>
+  <div id="fin" class="panel"><div class="fila">
+    <button id="btnDrive">Abrir Drive</button><button id="btnReiniciar" class="sec">Volver a empezar</button></div></div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+/* ==========================================================================
+   CONFIG — lo único que hay que tocar para cambiar textos, links y archivos.
+   Rutas de audio/video vacías ('') = ese recurso se saltea.
+   ========================================================================== */
+const CONFIG = {
+  pregunta: '¿Querés ver los trabajos de 4° año?',
+  driveURL: 'PEGAR_ACA_EL_LINK_DEL_DRIVE',      // se abre al tocar SÍ (después del giro)
+  chauTexto: '¡Chau!',                          // marco de texto si NO hay video de chau
+  subtitulos: true,                             // mostrar subtítulos si hay "subs" cargados
+
+  alturaRobot: 1.1,     // metros que mide Mazairita en la escena
+  anchoVideo: 0.9,      // metros de ancho del plano de video
+  distanciaB: 1.8,      // modo giroscopio: distancia (m) a la que aparece la escena
+  alturaPisoB: -1.3,    // modo giroscopio: piso respecto del celular (m)
+
+  /* Un GLB por animación. "tNorm" es el instante en que se mide el robot para
+     centrarlo y apoyarlo en el piso ('fin' = último cuadro). "ajuste" = [x,y,z]
+     en metros para corregir a mano si al cambiar de modelo "salta". */
+  modelos: {
+    aparicion: { src: './assets/modelos/mazairita_aparicion_saludo.glb', tNorm: 'fin', ajuste: [0, 0, 0] },
+    espera:    { src: './assets/modelos/mazairita_espera.glb',           tNorm: 0,     ajuste: [0, 0, 0] },
+    giro:      { src: './assets/modelos/mazairita_giro.glb',             tNorm: 0,     ajuste: [0, 0, 0] }
+  },
+
+  /* Fases con sonido/video. voz = MP3 narración (reloj maestro de la animación).
+     video = MP4 SIN audio. foleys = [{src:'./assets/audio/x.mp3', t:segundos, vol:0.5}].
+     subs = [{t:segundos, texto:'...'}]. */
+  fases: {
+    bienvenida: { voz: './assets/audio/voz_bienvenida.mp3', video: './assets/video/video_bienvenida.mp4', foleys: [], subs: [] },
+    giroSi:     { voz: '', video: '', foleys: [], subs: [] },
+    giroNo:     { voz: '', video: './assets/video/video_chau.mp4', foleys: [], subs: [] }
+  }
+};
+
+/* ============================ Utilidades UI ============================== */
+const $ = id => document.getElementById(id);
+const ui = { inicio:$('inicio'), barra:$('barra').firstElementChild, aviso:$('aviso'), comenzar:$('btnComenzar'),
+  indic:$('indicacion'), subs:$('subs'), pregunta:$('pregunta'), fin:$('fin'), chau:$('chau'), reubicar:$('reubicar'), cam:$('cam') };
+const mostrar = (el, v, disp = 'block') => el.style.display = v ? disp : 'none';
+$('textoPregunta').textContent = CONFIG.pregunta;
+ui.chau.textContent = CONFIG.chauTexto;
+
+/* ============================ Escena three.js ============================ */
+const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.05, 50);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x556677, 1.6));
+const sol = new THREE.DirectionalLight(0xffffff, 2); sol.position.set(1, 3, 2); scene.add(sol);
+
+const anclaje = new THREE.Group(); anclaje.visible = false; scene.add(anclaje);  // todo cuelga de acá y mira al espectador
+const planoVideo = new THREE.Mesh(new THREE.PlaneGeometry(1, 1),
+  new THREE.MeshBasicMaterial({ side: THREE.DoubleSide, toneMapped: false }));
+planoVideo.position.set(0.55, CONFIG.alturaRobot * 0.55, 0); planoVideo.visible = false; anclaje.add(planoVideo);
+const reticle = new THREE.Mesh(new THREE.RingGeometry(0.12, 0.16, 32).rotateX(-Math.PI / 2),
+  new THREE.MeshBasicMaterial({ color: 0xffd23f })); reticle.matrixAutoUpdate = false; reticle.visible = false; scene.add(reticle);
+
+addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+/* ============================== Precarga ================================= */
+const modelos = {};   // nombre -> { pivot, mixer, accion, dur }
+const medios = {};    // fase -> { voz, video, tex, foleys[] }
+const faltantes = [];
+let total = 0, hechos = 0;
+const progreso = () => { hechos++; ui.barra.style.width = (hechos / total * 100) + '%'; };
+
+// Espera a que un <audio>/<video> tenga metadatos; si falla o tarda, sigue igual (iOS no precarga sin toque)
+function cargarMedia(el, src) {
+  return new Promise(res => {
+    const ok = () => res(el), mal = () => { faltantes.push(src); res(null); };
+    el.addEventListener('loadedmetadata', ok, { once: true });
+    el.addEventListener('canplaythrough', ok, { once: true });
+    el.addEventListener('error', mal, { once: true });
+    setTimeout(ok, 6000);
+    el.preload = 'auto'; el.src = src; el.load();
+  }).then(r => { progreso(); return r; });
+}
+const nuevoAudio = src => cargarMedia(new Audio(), src);
+function nuevoVideo(src) {
+  const v = document.createElement('video');
+  v.playsInline = true; v.muted = true; v.crossOrigin = 'anonymous'; v.setAttribute('playsinline', ''); v.setAttribute('muted', '');
+  return cargarMedia(v, src);
+}
+
+async function precargar() {
+  const F = CONFIG.fases;
+  total = Object.keys(CONFIG.modelos).length;
+  for (const f of Object.values(F)) total += (f.voz ? 1 : 0) + (f.video ? 1 : 0) + f.foleys.length;
+
+  // 1) Modelos GLB (uno por animación)
+  const loader = new GLTFLoader(), crudos = {};
+  await Promise.all(Object.entries(CONFIG.modelos).map(async ([n, c]) => {
+    try { crudos[n] = await loader.loadAsync(c.src); } catch (e) { faltantes.push(c.src); console.warn('No cargó', c.src, e); }
+    progreso();
+  }));
+  armarModelos(crudos);
+
+  // 2) Voces, videos y foleys
+  for (const [fase, f] of Object.entries(F)) {
+    const m = medios[fase] = { voz: null, video: null, tex: null, foleys: [] };
+    if (f.voz) m.voz = await nuevoAudio(f.voz);
+    if (f.video) {
+      m.video = await nuevoVideo(f.video);
+      if (m.video) { m.tex = new THREE.VideoTexture(m.video); m.tex.colorSpace = THREE.SRGBColorSpace; }
+    }
+    for (const fo of f.foleys) { const el = await nuevoAudio(fo.src); if (el) { el.volume = fo.vol ?? 0.5; m.foleys.push({ ...fo, el, disparado: false }); } }
+  }
+}
+
+// Centra cada modelo, lo apoya en el piso y le da la MISMA escala (la de ESPERA) para que el cambio no salte
+function armarModelos(crudos) {
+  const medidas = {};
+  for (const [n, g] of Object.entries(crudos)) {
+    const mixer = new THREE.AnimationMixer(g.scene);
+    // Cada GLB trae el clip real + un clip "Giro" de 0,04 s sin uso: nos quedamos con el más largo
+    const clip = g.animations.reduce((a, b) => b.duration > a.duration ? b : a);
+    const accion = mixer.clipAction(clip); accion.play();
+    const c = CONFIG.modelos[n];
+    mixer.setTime(c.tNorm === 'fin' ? clip.duration - 0.02 : c.tNorm);
+    g.scene.updateMatrixWorld(true);
+    g.scene.traverse(o => o.isSkinnedMesh && o.skeleton.update());
+    const box = new THREE.Box3().setFromObject(g.scene, true);
+    medidas[n] = { box, size: box.getSize(new THREE.Vector3()), centro: box.getCenter(new THREE.Vector3()) };
+    console.log('[Mazairita]', n, 'alto', medidas[n].size.y.toFixed(2), 'clip', clip.name, clip.duration.toFixed(2) + 's');
+    accion.stop(); modelos[n] = { mixer, accion, dur: clip.duration, g };
+  }
+  const ref = medidas.espera || Object.values(medidas)[0];
+  if (!ref) return;
+  const s = CONFIG.alturaRobot / ref.size.y;
+  for (const [n, m] of Object.entries(modelos)) {
+    const md = medidas[n], aj = CONFIG.modelos[n].ajuste;
+    m.g.scene.scale.setScalar(s);
+    m.g.scene.position.set(-md.centro.x * s + aj[0], -md.box.min.y * s + aj[1], -md.centro.z * s + aj[2]);
+    m.pivot = new THREE.Group(); m.pivot.add(m.g.scene); m.pivot.position.x = -0.45; m.pivot.visible = false;
+    anclaje.add(m.pivot);
+  }
+}
+
+/* ============================ Máquina de fases ============================ */
+let activo = null;        // { modelo, voz, video, m, foleys, subs, loop, terminado, alTerminar }
+let pausado = false;
+
+function detener() {
+  if (!activo) return;
+  const a = activo; activo = null;
+  a.modelo.accion.stop(); a.modelo.pivot.visible = false;
+  if (a.voz) { a.voz.pause(); a.voz.currentTime = 0; a.voz.onended = null; }
+  if (a.video) { a.video.pause(); a.video.currentTime = 0; }
+  if (a.m) a.m.foleys.forEach(f => { f.el.pause(); f.el.currentTime = 0; f.disparado = false; });
+  planoVideo.visible = false; mostrar(ui.subs, false);
+}
+
+// Reproduce un modelo con (opcionalmente) voz + video + foleys de una fase
+function reproducir(nombre, fase, { loop = false, alTerminar } = {}) {
+  detener();
+  const modelo = modelos[nombre];
+  if (!modelo) { console.warn('Falta el modelo', nombre); alTerminar && alTerminar(); return; }
+  const m = fase ? medios[fase] : null, cfg = fase ? CONFIG.fases[fase] : null;
+  const a = activo = { modelo, voz: m?.voz || null, video: m?.video || null, m, foleys: m?.foleys || [], subs: cfg?.subs || [], loop, terminado: false, alTerminar };
+
+  Object.values(modelos).forEach(x => x.pivot && (x.pivot.visible = false));
+  modelo.pivot.visible = true;
+  modelo.accion.reset();
+  modelo.accion.setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, Infinity);
+  modelo.accion.clampWhenFinished = true;            // al terminar queda en la última pose, sin reiniciarse sola
+  modelo.accion.play(); modelo.mixer.setTime(0);
+
+  const terminar = () => { if (a.terminado || activo !== a) return; a.terminado = true; finDeFase(a); };
+  if (a.voz) {
+    a.voz.currentTime = 0; a.voz.onended = terminar;
+    a.voz.play().catch(e => { console.warn('Voz bloqueada', e); a.voz = null; });
+  }
+  if (!loop) modelo.mixer.addEventListener('finished', function h(e) {   // sin voz, manda el clip
+    if (e.action !== modelo.accion) return; modelo.mixer.removeEventListener('finished', h); if (!a.voz) terminar();
+  });
+  if (a.video) {
+    a.video.currentTime = 0; a.video.play().catch(() => {});
+    const asp = (a.video.videoWidth / a.video.videoHeight) || 16 / 9;
+    planoVideo.scale.set(CONFIG.anchoVideo, CONFIG.anchoVideo / asp, 1);
+    planoVideo.material.map = m.tex; planoVideo.material.needsUpdate = true; planoVideo.visible = true;
+  }
+  a.foleys.forEach(f => f.disparado = false);
+}
+
+function finDeFase(a) {
+  if (a.video) a.video.pause();
+  planoVideo.visible = false; mostrar(ui.subs, false);
+  a.alTerminar && a.alTerminar();
+}
+
+// Se llama en cada cuadro: sincroniza animación con el MP3 (reloj maestro), foleys y subtítulos
+function sincronizar(dt) {
+  const a = activo; if (!a) return;
+  const mx = a.modelo.mixer;
+  if (a.voz && !a.voz.paused && !a.terminado) {
+    const t = a.voz.currentTime;
+    if (Math.abs(mx.time - t) > 0.08) mx.setTime(Math.min(t, a.modelo.dur - 0.001));   // corrige desfase > 80 ms
+    else mx.update(dt);
+    for (const f of a.foleys) if (!f.disparado && t >= f.t) { f.disparado = true; f.el.currentTime = 0; f.el.play().catch(() => {}); }
+    if (CONFIG.subtitulos && a.subs.length) {
+      const s = [...a.subs].reverse().find(x => x.t <= t);
+      ui.subs.textContent = s ? s.texto : ''; mostrar(ui.subs, !!s);
+    }
+  } else mx.update(dt);
+}
+
+/* ================================ Flujo ================================== */
+function bienvenida() {
+  mostrar(ui.pregunta, false); mostrar(ui.fin, false); mostrar(ui.chau, false); mostrar(ui.indic, false);
+  reproducir('aparicion', 'bienvenida', { alTerminar: espera });
+}
+function espera() {
+  reproducir('espera', null, { loop: true });
+  mostrar(ui.pregunta, true);
+}
+$('btnSi').onclick = () => {
+  mostrar(ui.pregunta, false);
+  reproducir('giro', 'giroSi', { alTerminar: () => mostrar(ui.fin, true) });
+};
+$('btnNo').onclick = () => {
+  mostrar(ui.pregunta, false);
+  if (!medios.giroNo?.video) mostrar(ui.chau, true);       // sin MP4 de chau: marco de texto
+  reproducir('giro', 'giroNo', { alTerminar: () => { mostrar(ui.chau, false); espera(); } });
+};
+$('btnDrive').onclick = () => {
+  if (!CONFIG.driveURL.startsWith('http')) { alert('Todavía falta cargar el link del Drive.'); return; }
+  window.open(CONFIG.driveURL, '_blank', 'noopener');     // pestaña nueva: no se pierde la cámara
+};
+$('btnReiniciar').onclick = () => { detener(); bienvenida(); };   // vuelve a empezar sin recargar
+
+/* ======================= Colocación en RA (sin QR) ======================== */
+let modoXR = false, sesionXR = null, hitSource = null, refSpace = null;
+let esperandoToque = false;
+const v3 = new THREE.Vector3();
+
+function colocar() {
+  if (!esperandoToque) return;
+  if (modoXR) {                                   // Modo A: sobre la superficie detectada
+    if (!reticle.visible) return;
+    anclaje.position.setFromMatrixPosition(reticle.matrix);
+  } else {                                        // Modo B: a distancia real frente a la cámara 3D
+    const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion); dir.y = 0; dir.normalize();
+    anclaje.position.copy(camera.position).addScaledVector(dir, CONFIG.distanciaB);
+    anclaje.position.y = camera.position.y + CONFIG.alturaPisoB;
+  }
+  const primera = !anclaje.visible;
+  anclaje.visible = true; reticle.visible = false; esperandoToque = false;
+  mostrar(ui.indic, false); mostrar(ui.reubicar, true);
+  if (primera) bienvenida();
+}
+function pedirUbicacion(texto) {
+  esperandoToque = true; ui.indic.textContent = texto; mostrar(ui.indic, true);
+}
+ui.reubicar.onclick = () => pedirUbicacion(modoXR ? 'Apuntá al piso y tocá para mover a Mazairita' : 'Apuntá donde quieras y tocá para mover a Mazairita');
+renderer.domElement.addEventListener('pointerdown', () => { if (!modoXR) colocar(); });
+ui.indic.addEventListener('pointerdown', () => { if (!modoXR) colocar(); });
+
+// Giroscopio (modo B): fórmula estándar de three.js para pasar DeviceOrientation a cuaternión
+const zee = new THREE.Vector3(0, 0, 1), eu = new THREE.Euler(), q0 = new THREE.Quaternion(), q1 = new THREE.Quaternion(-Math.SQRT1_2, 0, 0, Math.SQRT1_2);
+let tieneGiro = false;
+addEventListener('deviceorientation', e => {
+  if (modoXR || e.alpha == null) return;
+  tieneGiro = true;
+  const ang = THREE.MathUtils.degToRad((screen.orientation && screen.orientation.angle) || window.orientation || 0);
+  eu.set(THREE.MathUtils.degToRad(e.beta), THREE.MathUtils.degToRad(e.alpha), -THREE.MathUtils.degToRad(e.gamma), 'YXZ');
+  camera.quaternion.setFromEuler(eu).multiply(q1).multiply(q0.setFromAxisAngle(zee, -ang));
+});
+
+/* ============================ Inicio (botón) ============================== */
+const mensaje = t => { ui.aviso.textContent = t; };
+
+async function comenzar() {
+  // 1) Dentro del toque: destrabar audio y video (política de autoplay de iOS/Chrome)
+  Object.values(medios).forEach(m => {
+    [m.voz, m.video, ...m.foleys.map(f => f.el)].forEach(el => {
+      if (!el) return; const p = el.play(); if (p) p.then(() => { el.pause(); el.currentTime = 0; }).catch(() => {});
+    });
+  });
+  // 2) Pedir permiso del giroscopio en iOS (también tiene que ser dentro del toque)
+  let permisoGiro = null;
+  if (typeof DeviceOrientationEvent !== 'undefined' && DeviceOrientationEvent.requestPermission) permisoGiro = DeviceOrientationEvent.requestPermission();
+
+  // 3) Modo A (WebXR) si existe, si no Modo B
+  let xrOk = false;
+  try { xrOk = !!(navigator.xr && await navigator.xr.isSessionSupported('immersive-ar')); } catch (e) {}
+  mostrar(ui.inicio, false);
+  if (xrOk) {
+    try { await iniciarXR(); return; } catch (e) { console.warn('WebXR falló, uso modo giroscopio', e); mostrar(ui.inicio, false); }
+  }
+  await iniciarGiroscopio(permisoGiro);
+}
+
+async function iniciarXR() {
+  modoXR = true; renderer.xr.enabled = true;
+  sesionXR = await navigator.xr.requestSession('immersive-ar', {
+    requiredFeatures: ['hit-test'], optionalFeatures: ['dom-overlay'], domOverlay: { root: $('ui') } });
+  ui.cam.style.display = 'none';
+  document.body.style.background = 'transparent';
+  $('ui').addEventListener('beforexrselect', e => { if (e.target.closest('button')) e.preventDefault(); });
+  await renderer.xr.setSession(sesionXR);
+  refSpace = await sesionXR.requestReferenceSpace('local');
+  const viewer = await sesionXR.requestReferenceSpace('viewer');
+  hitSource = await sesionXR.requestHitTestSource({ space: viewer });
+  sesionXR.addEventListener('select', colocar);
+  sesionXR.addEventListener('end', () => { location.reload(); });
+  pedirUbicacion('Apuntá al piso y tocá la pantalla para ubicar a Mazairita');
+}
+
+async function iniciarGiroscopio(permisoGiro) {
+  modoXR = false;
+  if (!window.isSecureContext || !navigator.mediaDevices) { mostrar(ui.inicio, true); mensaje('Hace falta abrir la página con HTTPS para usar la cámara.'); return; }
+  try {
+    const s = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+    ui.cam.srcObject = s; ui.cam.style.display = 'block'; await ui.cam.play().catch(() => {});
+  } catch (e) {
+    mostrar(ui.inicio, true); mensaje('No pudimos usar la cámara. Revisá el permiso en el navegador y volvé a tocar Comenzar.'); return;
+  }
+  let giroOk = true;
+  if (permisoGiro) { try { giroOk = (await permisoGiro) === 'granted'; } catch (e) { giroOk = false; } }
+  pedirUbicacion(giroOk
+    ? 'Apuntá hacia donde quieras que aparezca Mazairita y tocá la pantalla'
+    : 'Sin giroscopio la escena queda fija a la pantalla. Tocá para ubicar a Mazairita');
+}
+
+/* ============================= Bucle principal ============================ */
+const reloj = new THREE.Clock();
+renderer.setAnimationLoop((t, frame) => {
+  const dt = Math.min(reloj.getDelta(), 0.1);
+  if (pausado) return;
+  if (frame && hitSource && esperandoToque) {             // Modo A: reticle sobre el piso
+    const hits = frame.getHitTestResults(hitSource);
+    if (hits.length) { reticle.visible = true; reticle.matrix.fromArray(hits[0].getPose(refSpace).transform.matrix); }
+    else reticle.visible = false;
+  }
+  if (anclaje.visible) {                                  // Billboard sobre el eje Y: mira siempre al espectador
+    camera.getWorldPosition(v3);
+    anclaje.rotation.y = Math.atan2(v3.x - anclaje.position.x, v3.z - anclaje.position.z);
+  }
+  sincronizar(dt);
+  renderer.render(scene, camera);
+});
+
+// Pausar todo al salir de la pestaña y reanudar al volver
+document.addEventListener('visibilitychange', () => {
+  pausado = document.hidden;
+  const a = activo;
+  if (document.hidden) { a?.voz?.pause(); a?.video?.pause(); ui.cam.pause(); }
+  else { a && !a.terminado && (a.voz?.play().catch(() => {}), a.video?.play().catch(() => {})); ui.cam.srcObject && ui.cam.play().catch(() => {}); }
+});
+
+/* ================================ Arranque ================================ */
+ui.comenzar.onclick = comenzar;
+precargar().then(() => {
+  mensaje(faltantes.length ? 'No se pudieron cargar: ' + faltantes.map(f => f.split('/').pop()).join(', ') + '. Podés continuar igual.' : '¡Todo listo!');
+  ui.comenzar.disabled = !modelos.espera && !modelos.aparicion;
+}).catch(e => { console.error(e); mensaje('Hubo un error al cargar. Probá recargar la página.'); });
+</script>
+</body>
+</html>
